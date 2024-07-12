@@ -2261,6 +2261,23 @@ def associative_scan(fn: Callable, elems, reverse: bool = False, axis: int = 0):
                      'first dimension. (saw: {})'
                      .format([elem.shape for elem in elems_flat]))
 
+  # Serial scan
+  def _scan_serial(elems):
+    num_elems = elems[0].shape[axis]
+
+    carry = [slicing.index_in_dim(x, 0, keepdims=False) for x in elems]
+    sums = [carry]
+
+    for i in range(1, num_elems):
+      xs_slice = [slicing.index_in_dim(x, i, keepdims=False) for x in elems]
+      sum_slice = combine(carry, xs_slice)
+      sums.append(sum_slice)
+      carry = sum_slice
+
+    stack = lambda *sums: jax.numpy.stack(sums)
+    stacked_sums = tree_map(stack, *sums)
+
+    return stacked_sums
 
   # Summary of algorithm:
   #
