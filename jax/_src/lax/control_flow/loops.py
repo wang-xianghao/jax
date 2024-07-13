@@ -2262,10 +2262,12 @@ def associative_scan(fn: Callable, elems, reverse: bool = False, axis: int = 0):
                      .format([elem.shape for elem in elems_flat]))
 
   # Serial scan
-  def _scan_serial(elems):
+  def _scan_serial(elems, prefix = None):
     num_elems = elems[0].shape[axis]
 
     carry = [slicing.index_in_dim(x, 0, keepdims=False) for x in elems]
+    if prefix is not None:
+      carry = combine(carry, prefix)
     sums = [carry]
 
     for i in range(1, num_elems):
@@ -2278,6 +2280,18 @@ def associative_scan(fn: Callable, elems, reverse: bool = False, axis: int = 0):
     stacked_sums = tree_map(stack, *sums)
 
     return stacked_sums
+  
+  # Binary reduce block
+  def _reduce_block(elems):
+    # TODO: test different slice way: interleave or block
+    num_elems = elems[0].shape[axis]
+    offset = num_elems >> 1
+    while offset != 0:
+      elems = combine(
+        [slicing.slice_in_dim(elem, 0, -1, stride=2, axis=axis) for elem in elems],
+        [slicing.slice_in_dim(elem, 1, None, stride=2, axis=axis) for elem in elems])
+      offset = offset >> 1
+    return elems
 
   # Summary of algorithm:
   #
@@ -2296,38 +2310,43 @@ def associative_scan(fn: Callable, elems, reverse: bool = False, axis: int = 0):
   # a (small two-down-to-one) reduction step.
   def _scan(elems):
     """Perform scan on `elems`."""
-
     num_elems = elems[0].shape[axis]
+    block_size = 1 << 10
+    block_nums = int((num_elems + block_size - 1) / block_size)
 
     if num_elems < 2:
       return elems
+    
+    # # Perform serial scanning with few blocks
+    # if block_nums <= 2:
+    #   return _scan_serial(elems)
+    
+    # Split blocks
+    blocks = []
+    for left in range(0, num_elems, block_size):
+      blocks.append([slicing.dynamic_slice_in_dim(elem, left, block_size, axis=axis) for elem in elems])
 
-    # Combine adjacent pairs of elements.
-    reduced_elems = combine(
-      [slicing.slice_in_dim(elem, 0, -1, stride=2, axis=axis) for elem in elems],
-      [slicing.slice_in_dim(elem, 1, None, stride=2, axis=axis)
-       for elem in elems])
+    # Reduce each block
+    block_sums = [jax.numpy.array([], dtype=elems[0].dtype)]
+    for i in range(0, block_nums):
+      block_sum = _reduce_block(blocks[i])
+      block_sums = [
+        lax.concatenate([slicing.slice_in_dim(elem, 0, None, axis=axis), result],
+                        dimension=axis)
+        for (elem, result) in zip(block_sums, block_sum)]
 
-    # Recursively compute scan for partially reduced tensors.
-    odd_elems = _scan(reduced_elems)
+    # Scan each block with previous block's reduction result
+    elems_scan = _scan_serial(blocks[0])
+    for i in range(1, block_nums):
+      prefix = [slicing.index_in_dim(x, i - 1, keepdims=False) for x in block_sums]
+      block_scan = _scan_serial(blocks[i], prefix)
+      print(block_scan)
+      elems_scan = [
+        lax.concatenate([slicing.slice_in_dim(elem, 0, None, axis=axis), result],
+                        dimension=axis)
+        for (elem, result) in zip(elems_scan, block_scan)]
 
-    if num_elems % 2 == 0:
-      even_elems = combine(
-        [slicing.slice_in_dim(e, 0, -1, axis=axis) for e in odd_elems],
-        [slicing.slice_in_dim(e, 2, None, stride=2, axis=axis) for e in elems])
-    else:
-      even_elems = combine(
-        odd_elems,
-        [slicing.slice_in_dim(e, 2, None, stride=2, axis=axis) for e in elems])
-
-    # The first element of a scan is the same as the first element
-    # of the original `elems`.
-    even_elems = [
-      lax.concatenate([slicing.slice_in_dim(elem, 0, 1, axis=axis), result],
-                      dimension=axis)
-      for (elem, result) in zip(elems, even_elems)]
-    return list(_map(partial(_interleave, axis=axis), even_elems, odd_elems))
-
+    return elems_scan
   scans = _scan(elems_flat)
 
   if reverse:
