@@ -2310,43 +2310,55 @@ def associative_scan(fn: Callable, elems, reverse: bool = False, axis: int = 0):
   # a (small two-down-to-one) reduction step.
   def _scan(elems):
     """Perform scan on `elems`."""
+    p = 5
     num_elems = elems[0].shape[axis]
-    block_size = 1 << 10
+    block_size = 1 << p
     block_nums = int((num_elems + block_size - 1) / block_size)
 
     if num_elems < 2:
       return elems
     
-    # # Perform serial scanning with few blocks
-    # if block_nums <= 2:
-    #   return _scan_serial(elems)
-    
-    # Split blocks
-    blocks = []
-    for left in range(0, num_elems, block_size):
-      blocks.append([slicing.dynamic_slice_in_dim(elem, left, block_size, axis=axis) for elem in elems])
+    # binary reduce each block
+    # O(p)
+    reduced_elems = elems
+    for i in range(p):
+        reduced_elems = combine(
+          [slicing.slice_in_dim(elem, 0, None, stride=2, axis=axis) for elem in reduced_elems],
+          [slicing.slice_in_dim(elem, 1, None, stride=2, axis=axis) for elem in reduced_elems]
+        )
+    reduced_elems = _scan_serial(reduced_elems)
 
-    # Reduce each block
-    block_sums = [jax.numpy.array([], dtype=elems[0].dtype)]
-    for i in range(0, block_nums):
-      block_sum = _reduce_block(blocks[i])
-      block_sums = [
-        lax.concatenate([slicing.slice_in_dim(elem, 0, None, axis=axis), result],
-                        dimension=axis)
-        for (elem, result) in zip(block_sums, block_sum)]
+    # scan all blocks
+    # O(2^p)
+    result = combine(
+        [slicing.slice_in_dim(elem, block_size, None, stride=block_size, axis=axis) for elem in elems],
+        [slicing.slice_in_dim(elem, 0, elem.shape[axis] - 1, stride=1, axis=axis) for elem in reduced_elems]
+    )
+    result = [
+      lax.concatenate([slicing.index_in_dim(elem_a, 0, axis=axis), elem_b], dimension=axis)
+      for (elem_a, elem_b) in zip(elems, result)]
 
-    # Scan each block with previous block's reduction result
-    elems_scan = _scan_serial(blocks[0])
+    prev_items = result
+    for i in range(1, block_size):
+      scanned_items = combine(
+        prev_items,
+        [slicing.slice_in_dim(elem, i, None, stride=block_size, axis=axis) for elem in elems]
+      )
+      result = [
+        lax.concatenate([elem_a, elem_b], dimension=axis)
+      for (elem_a, elem_b) in zip(result, scanned_items)]
+      prev_items = scanned_items
+
+    # rearrange results
+    # O(N / (2^p))
+    ordered_result = [slicing.slice_in_dim(elem, 0, None, stride=block_nums, axis=axis) for elem in result]
     for i in range(1, block_nums):
-      prefix = [slicing.index_in_dim(x, i - 1, keepdims=False) for x in block_sums]
-      block_scan = _scan_serial(blocks[i], prefix)
-      print(block_scan)
-      elems_scan = [
-        lax.concatenate([slicing.slice_in_dim(elem, 0, None, axis=axis), result],
-                        dimension=axis)
-        for (elem, result) in zip(elems_scan, block_scan)]
+      ordered_result = [
+        lax.concatenate([elem_a, slicing.slice_in_dim(elem_b, i, None, stride=block_nums, axis=axis)], dimension=axis)
+      for (elem_a, elem_b) in zip(ordered_result, result)]
 
-    return elems_scan
+    return ordered_result
+  
   scans = _scan(elems_flat)
 
   if reverse:
