@@ -2293,6 +2293,8 @@ def associative_scan(fn: Callable, elems, reverse: bool = False, axis: int = 0):
       offset = offset >> 1
     return elems
 
+  import time
+
   # Summary of algorithm:
   #
   # Consider elements of `_scan(elems)` at odd indices. That's the same as first
@@ -2310,7 +2312,8 @@ def associative_scan(fn: Callable, elems, reverse: bool = False, axis: int = 0):
   # a (small two-down-to-one) reduction step.
   def _scan(elems):
     """Perform scan on `elems`."""
-    p = 5
+    total_start = time.time()
+    p = 8
     num_elems = elems[0].shape[axis]
     block_size = 1 << p
     block_nums = int((num_elems + block_size - 1) / block_size)
@@ -2320,14 +2323,18 @@ def associative_scan(fn: Callable, elems, reverse: bool = False, axis: int = 0):
     
     # binary reduce each block
     # O(p)
+    start = time.time()
     reduced_elems = elems
     for i in range(p):
         reduced_elems = combine(
           [slicing.slice_in_dim(elem, 0, None, stride=2, axis=axis) for elem in reduced_elems],
           [slicing.slice_in_dim(elem, 1, None, stride=2, axis=axis) for elem in reduced_elems]
         )
+    print('reduce time: ', time.time() - start)
+    start = time.time()
     reduced_elems = _scan_serial(reduced_elems)
-
+    print('reduce time scan: ', time.time() - start)
+    start = time.time()
     # scan all blocks
     # O(2^p)
     result = combine(
@@ -2337,17 +2344,25 @@ def associative_scan(fn: Callable, elems, reverse: bool = False, axis: int = 0):
     result = [
       lax.concatenate([slicing.index_in_dim(elem_a, 0, axis=axis), elem_b], dimension=axis)
       for (elem_a, elem_b) in zip(elems, result)]
+    
+    total_combine = 0.0
 
     prev_items = result
     for i in range(1, block_size):
+      combine_start = time.time()
       scanned_items = combine(
         prev_items,
         [slicing.slice_in_dim(elem, i, None, stride=block_size, axis=axis) for elem in elems]
       )
+      total_combine += time.time() - combine_start
       result = [
         lax.concatenate([elem_a, elem_b], dimension=axis)
       for (elem_a, elem_b) in zip(result, scanned_items)]
       prev_items = scanned_items
+
+    print('combine time: ', total_combine)
+    print('scan time: ', time.time() - start)
+    start = time.time()
 
     # rearrange results
     # O(N / (2^p))
@@ -2356,6 +2371,10 @@ def associative_scan(fn: Callable, elems, reverse: bool = False, axis: int = 0):
       ordered_result = [
         lax.concatenate([elem_a, slicing.slice_in_dim(elem_b, i, None, stride=block_nums, axis=axis)], dimension=axis)
       for (elem_a, elem_b) in zip(ordered_result, result)]
+
+    print('rearrange time: ', time.time() - start)
+    print('total time: ', time.time() - total_start)
+
 
     return ordered_result
   
