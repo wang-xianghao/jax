@@ -2283,33 +2283,20 @@ def associative_scan(fn: Callable, elems, reverse: bool = False, axis: int = 0):
 
     if num_elems < 2:
       return elems
+    
+    offset = 1
+    while offset < num_elems:
+      reduced_elems = combine(
+        [slicing.slice_in_dim(elem, 0, -offset, stride=1, axis=axis) for elem in elems],
+        [slicing.slice_in_dim(elem, offset, None, stride=1, axis=axis) for elem in elems])
+      elems = [
+        lax.concatenate([slicing.slice_in_dim(elem_a, 0, offset, axis=axis), elem_b], dimension=axis)
+          for (elem_a, elem_b) in zip(elems, reduced_elems)]
 
-    # Combine adjacent pairs of elements.
-    reduced_elems = combine(
-      [slicing.slice_in_dim(elem, 0, -1, stride=2, axis=axis) for elem in elems],
-      [slicing.slice_in_dim(elem, 1, None, stride=2, axis=axis)
-       for elem in elems])
+      offset *= 2
 
-    # Recursively compute scan for partially reduced tensors.
-    odd_elems = _scan(reduced_elems)
-
-    if num_elems % 2 == 0:
-      even_elems = combine(
-        [slicing.slice_in_dim(e, 0, -1, axis=axis) for e in odd_elems],
-        [slicing.slice_in_dim(e, 2, None, stride=2, axis=axis) for e in elems])
-    else:
-      even_elems = combine(
-        odd_elems,
-        [slicing.slice_in_dim(e, 2, None, stride=2, axis=axis) for e in elems])
-
-    # The first element of a scan is the same as the first element
-    # of the original `elems`.
-    even_elems = [
-      lax.concatenate([slicing.slice_in_dim(elem, 0, 1, axis=axis), result],
-                      dimension=axis)
-      for (elem, result) in zip(elems, even_elems)]
-    return list(_map(partial(_interleave, axis=axis), even_elems, odd_elems))
-
+    return elems
+  
   scans = _scan(elems_flat)
 
   if reverse:
